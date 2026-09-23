@@ -1,0 +1,12 @@
+certs/*.key
+*.pem
+
+pg_primary_data/
+pg_replica_data/
+wal_archive/
+pg_base_backup/
+
+.vscode/
+.claude/
+
+.DS_Store

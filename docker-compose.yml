@@ -1,0 +1,138 @@
+networks:
+  appnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.10.20.0/24
+
+services:
+  frontend-active:
+    build: ./frontend
+    container_name: frontend-active
+    hostname: frontend-active
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - ROLE=active
+    networks:
+      appnet:
+        ipv4_address: 10.10.20.11
+    volumes:
+      - ./keepalived/frontend-active.conf:/etc/keepalived/keepalived.conf
+    ports:
+      - "8081:80"   # เข้าตรงเครื่องนี้ได้เพื่อ debug เทียบกับ VIP (production จริงไม่ควร publish ตรง ๆ แบบนี้)
+
+  frontend-passive:
+    build: ./frontend
+    container_name: frontend-passive
+    hostname: frontend-passive
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - ROLE=passive
+    networks:
+      appnet:
+        ipv4_address: 10.10.20.12
+    volumes:
+      - ./keepalived/frontend-passive.conf:/etc/keepalived/keepalived.conf
+    ports:
+      - "8082:80"
+
+  backend-active:
+    build: ./backend
+    container_name: backend-active
+    hostname: backend-active
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - ROLE=active
+    networks:
+      appnet:
+        ipv4_address: 10.10.20.21
+    volumes:
+      - ./keepalived/backend-active.conf:/etc/keepalived/keepalived.conf
+    ports:
+      - "8091:8000"
+
+  backend-passive:
+    build: ./backend
+    container_name: backend-passive
+    hostname: backend-passive
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - ROLE=passive
+    networks:
+      appnet:
+        ipv4_address: 10.10.20.22
+    volumes:
+      - ./keepalived/backend-passive.conf:/etc/keepalived/keepalived.conf
+    ports:
+      - "8092:8000"
+
+  pg-primary:
+    image: postgres:18.3
+    container_name: pg-primary
+    networks:
+      - appnet
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=primary_admin_pass
+      - POSTGRES_DB=mydb
+    command: |
+      postgres
+      -c wal_level=replica
+      -c max_wal_senders=10
+      -c max_replication_slots=10
+      -c hot_standby=on
+      -c archive_mode=on
+      -c archive_command='cp %p /wal_archive/%f'
+      -c archive_timeout=30
+      -c ssl=on
+    volumes:
+      - ./pg_primary_data:/var/lib/postgresql
+      - ./init-primary.sql:/docker-entrypoint-initdb.d/init-primary.sql
+      - ./init-hba.sh:/docker-entrypoint-initdb.d/init-hba.sh
+      - ./wal_archive:/wal_archive
+      - ./pg_base_backup:/pg_base_backup
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  pg-replica:
+    image: postgres:18.3
+    container_name: pg-replica
+    networks:
+      - appnet
+    depends_on:
+      pg-primary:
+        condition: service_healthy
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=primary_admin_pass
+    entrypoint: |
+      bash -c "
+      if [ ! -s \$$PGDATA/PG_VERSION ]; then
+        echo 'Initializing replica from primary...'
+        until PGPASSWORD=replicator_pass PGSSLMODE=verify-ca PGSSLROOTCERT=/etc/ssl/certs/server.crt pg_basebackup -h pg-primary -U replicator -D \$$PGDATA -R -X stream -c fast;
+        do
+          echo 'Waiting for primary...'
+          sleep 2
+        done
+        echo 'Backup complete, starting replica!'
+      fi
+      exec docker-entrypoint.sh postgres -c hot_standby=on
+      "
+    volumes:
+      - ./pg_replica_data:/var/lib/postgresql
+      - ./certs/server.crt:/etc/ssl/certs/server.crt
