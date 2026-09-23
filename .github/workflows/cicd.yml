@@ -1,0 +1,21 @@
+name: CI
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+jobs:
+  build-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+      - uses: actions/checkout@v4
+
+      - name: Validate docker compose config
+      - run: docker compose config
+
+      - name: Build frontend image
+      - run: docker build ./frontend
+
+      - name: Build backend image
+      - run: docker build ./backend
