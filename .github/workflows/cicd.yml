@@ -13,7 +13,6 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
       - name: Validate docker compose config
         run: docker compose config
       - name: Log in to GHCR
@@ -25,20 +24,20 @@ jobs:
       - name: Set lowercase owner
         run: echo "OWNER_LC=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - name: Build frontend image
-        run: docker build -t ghcr.io/${{ env.OWNER_LC }}/frontend:latest ./frontend
-      - name: Push frontend image
-        run: docker push ghcr.io/${{ env.OWNER_LC }}/frontend:latest
+        run: docker build ./frontend
       - name: Build and push versioned frontend
         if: startsWith(github.ref, 'refs/tags/')
         run: |
+          docker build -t ghcr.io/${{ env.OWNER_LC }}/frontend:latest ./frontend
+          docker push ghcr.io/${{ env.OWNER_LC }}/frontend:latest
           docker build -t ghcr.io/${{ env.OWNER_LC }}/frontend:${{ github.ref_name }} ./frontend
           docker push ghcr.io/${{ env.OWNER_LC }}/frontend:${{ github.ref_name }}
       - name: Build backend image
-        run: docker build -t ghcr.io/${{ env.OWNER_LC }}/backend:latest ./backend
-      - name: Push backend image
-        run: docker push ghcr.io/${{ env.OWNER_LC }}/backend:latest
+        run: docker build ./backend
       - name: Build and push versioned backend
         if: startsWith(github.ref, 'refs/tags/')
         run: |
+          docker build -t ghcr.io/${{ env.OWNER_LC }}/backend:latest ./backend
+          docker push ghcr.io/${{ env.OWNER_LC }}/backend:latest
           docker build -t ghcr.io/${{ env.OWNER_LC }}/backend:${{ github.ref_name }} ./backend
           docker push ghcr.io/${{ env.OWNER_LC }}/backend:${{ github.ref_name }}
