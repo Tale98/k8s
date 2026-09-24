@@ -32,14 +32,12 @@ jobs:
       - name: Build and push versioned frontend
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          docker build -t ghcr.io/${{ env.OWNER_LC }}/frontend:latest ./frontend
+          docker build -t ghcr.io/${{ env.OWNER_LC }}/frontend:latest -t ghcr.io/${{ env.OWNER_LC }}/frontend:${{ github.ref_name }} ./frontend
           docker push ghcr.io/${{ env.OWNER_LC }}/frontend:latest
-          docker build -t ghcr.io/${{ env.OWNER_LC }}/frontend:${{ github.ref_name }} ./frontend
           docker push ghcr.io/${{ env.OWNER_LC }}/frontend:${{ github.ref_name }}
       - name: Build and push versioned backend
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          docker build -t ghcr.io/${{ env.OWNER_LC }}/backend:latest ./backend
+          docker build -t ghcr.io/${{ env.OWNER_LC }}/backend:latest -t ghcr.io/${{ env.OWNER_LC }}/backend:${{ github.ref_name }} ./backend
           docker push ghcr.io/${{ env.OWNER_LC }}/backend:latest
-          docker build -t ghcr.io/${{ env.OWNER_LC }}/backend:${{ github.ref_name }} ./backend
           docker push ghcr.io/${{ env.OWNER_LC }}/backend:${{ github.ref_name }}
