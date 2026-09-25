@@ -1,4 +1,4 @@
-# Lab Notes: Firewall / Database Replication+TLS / Keepalived VRRP
+# Lab Notes: Firewall / Database Replication+TLS / Keepalived VRRP / CI-CD
 
 > สรุปความรู้และคำสั่งจาก lab บน Multipass VM (`k8s-master`, `k8s-worker-1`, `k8s-worker-2`)
 
@@ -213,3 +213,122 @@ multipass start k8s-worker-1    # worker-1 priority สูงกว่า จะ
 nopreempt
 ```
 ใส่ไว้ใน `vrrp_instance` block ของฝั่งที่ไม่อยากให้ preempt (ปกติใส่ฝั่ง state ที่เป็น BACKUP หรือใช้คู่กับ `state BACKUP` เสมอในทุกเครื่อง)
+
+---
+
+## 4. CI/CD (GitHub Actions)
+
+### หลักการ
+
+```
+CI (Continuous Integration)  = ทุก push ให้ระบบ build/test อัตโนมัติทันที ไม่รอคนมาเทสเอง
+CD (Continuous Delivery/Deployment) = เตรียม/ส่ง artifact (image) ไปใช้งานจริงอัตโนมัติ
+```
+
+Runner (ทั้ง GitHub Actions self-hosted runner และ GitLab Runner) ทำงานแบบ **"เปิด connection ออกไปหา server เองล่วงหน้า แล้วค้างสายรอ"** (เหมือน call center ที่ลูกค้าโทรเข้าไปรอสาย) — เพราะฉะนั้นใช้งานได้แม้เครื่อง runner อยู่หลัง NAT/private network โดยไม่ต้องเปิด port อะไรเลยฝั่งเรา ตัว event (push/merge) เกิดที่ GitHub ก็จริง แต่ไม่ต้องเป็นฝ่าย "เปิด connection เข้ามา" หา runner
+
+### สถาปัตยกรรมที่ทำจริง: แยก CI กับ CD คนละไฟล์ คนละ trigger
+
+```
+main    ──push──▶            .github/workflows/ci.yml   (build + validate เท่านั้น ไม่ publish)
+release ──merge จาก main──▶  push (แค่จุดพัก ไม่มี workflow ผูกไว้ หรือจะ validate ซ้ำก็ได้)
+tag "X.Y.Z" (มือ, push จาก release) ──▶ .github/workflows/cd.yml  (build + push ขึ้น ghcr.io)
+```
+
+**เหตุผลที่แยก branch/ไฟล์**: กันไม่ให้ workflow เดียวรก ต้องมี `if:` คอยแยกเงื่อนไขเยอะ ๆ — แยก trigger ให้ทำหน้าที่แยกกันตั้งแต่ระดับ `on:` เลย ไม่ต้องใช้ `if:` แยก step อีกที
+
+**เหตุผลที่ tag เป็นตัว publish จริง ไม่ใช่ push เข้า `release` เฉย ๆ**: semantic version (major.minor.patch) เป็นการตัดสินใจของคน ไม่มีเครื่องมือไหนรู้ได้เองว่า commit นี้ "สำคัญแค่ไหน" — สำหรับ scale เล็ก/คนเดียว tag มือคือคำตอบที่ดีที่สุด ไม่ต้องพึ่ง auto-versioning tool (`github.run_number`, semantic-release ฯลฯ) ซึ่งเหมาะกับทีมใหญ่ที่มีวินัย commit message ร่วมกันมากกว่า
+
+### `ci.yml` (trigger จาก `main`)
+
+```yaml
+name: CI
+on:
+  push:
+    branches: ["main"]
+jobs:
+  build-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config
+      - run: docker build ./frontend
+      - run: docker build ./backend
+```
+
+### `cd.yml` (trigger จาก tag เท่านั้น)
+
+```yaml
+name: CD
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+permissions:
+  contents: read
+  packages: write
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set lowercase owner
+        run: echo "OWNER_LC=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+      - name: Build and push versioned frontend
+        run: |
+          docker build -t ghcr.io/${{ env.OWNER_LC }}/frontend:latest -t ghcr.io/${{ env.OWNER_LC }}/frontend:${{ github.ref_name }} ./frontend
+          docker push ghcr.io/${{ env.OWNER_LC }}/frontend:latest
+          docker push ghcr.io/${{ env.OWNER_LC }}/frontend:${{ github.ref_name }}
+      - name: Build and push versioned backend
+        run: |
+          docker build -t ghcr.io/${{ env.OWNER_LC }}/backend:latest -t ghcr.io/${{ env.OWNER_LC }}/backend:${{ github.ref_name }} ./backend
+          docker push ghcr.io/${{ env.OWNER_LC }}/backend:latest
+          docker push ghcr.io/${{ env.OWNER_LC }}/backend:${{ github.ref_name }}
+```
+
+### Syntax สำคัญที่เจอระหว่างทาง
+
+| Syntax | ความหมาย |
+|---|---|
+| `uses:` vs `run:` | `uses` เรียก action สำเร็จรูปจาก marketplace, `run` สั่ง shell ตรง ๆ |
+| `secrets.GITHUB_TOKEN` | token ที่ GitHub สร้างให้อัตโนมัติทุก run ไม่ต้องสร้าง PAT เอง |
+| `${{ ... }}` | expression syntax ดึงค่าตัวแปรที่ระบบเตรียมไว้ (`github.actor`, `github.ref_name`, `github.sha`, ...) |
+| `$GITHUB_ENV` | ไฟล์พิเศษ เขียน `KEY=value` ลงไปแล้วใช้ `${{ env.KEY }}` ใน step ถัดไปได้ (แต่ละ step รันคนละ shell process ตัวแปรธรรมดาข้าม step ไม่ได้) |
+| `if:` บน step | กำหนดเงื่อนไขให้ step นั้นรันเฉพาะบางกรณี (ระดับ step ไม่ใช่แค่ระดับ job) |
+| `tags:` filter | ใช้ glob pattern ของ GitHub เอง **ไม่ใช่ regex เต็มรูปแบบ** รองรับ `*`, `**`, `?`, `+`, `[0-9]` |
+
+### ข้อควรระวังที่เจอจริง
+
+- **Docker image tag ต้องเป็นตัวพิมพ์เล็กทั้งหมด** — `github.repository_owner`/`github.actor` ให้ค่าตามที่ username สะกดจริง (มีตัวใหญ่ได้) ต้องแปลงเองด้วย `tr '[:upper:]' '[:lower:]'` ก่อนใช้เป็น image tag เสมอ
+- **`docker build -t tag1 -t tag2 ...`** — build ครั้งเดียวแปะได้หลาย tag พร้อมกัน (หรือใช้ `docker tag` แปะชื่อเพิ่มให้ image ที่ build เสร็จแล้วโดยไม่ build ซ้ำก็ได้ ผลเหมือนกัน)
+- **`git push` ธรรมดาไม่พา tag ไปด้วย** ต้อง push แยก: `git push origin <tag-name>`
+- **Git tag ถูกออกแบบให้แก้ไม่ได้ (immutable)** — `git tag` ชื่อซ้ำจะ error ถ้าต้อง force ใช้ `git tag -f` + `git push --force` แต่ไม่ควรทำถ้า tag เคย push ออกไปแล้ว (คนละคนอาจอ้างอิง commit คนละตัวภายใต้ชื่อเดียวกัน) — ถ้า tag ผิด ให้ข้ามไปใช้เลขใหม่แทน
+- **`on: push: branches: [...] tags: [...]`** ทำงานแบบ **OR** เสมอ (1 push มี ref เดียว เป็นได้แค่ branch หรือ tag อย่างใดอย่างหนึ่ง ไม่มีทาง AND)
+- **ไม่มี event `on: merge:`** ใน GitHub Actions — merge ที่ถูก push ออกไปนับเป็น `push` event ธรรมดา
+
+### Self-hosted runner (concept, ยังไม่ได้ทำจริง)
+
+ติดตั้งเป็น native package (ไม่ใช่ Docker image) รันเป็น systemd service (คล้าย `keepalived`):
+```bash
+./config.sh --url https://github.com/<user>/<repo> --token <TOKEN>
+sudo ./svc.sh install && sudo ./svc.sh start
+```
+ขอ token ผ่าน command line ได้ (ไม่ต้องเข้าเว็บ) เหมาะกับ automation จริง:
+```bash
+gh api -X POST /repos/<user>/<repo>/actions/runners/registration-token --jq .token
+```
+**สำคัญ**: self-hosted runner ยังต้องพึ่ง github.com เป็นตัวกลางเสมอ (แค่เปลี่ยนว่า "งานรันที่ไหน" ไม่ใช่ "ตัด GitHub ออกทั้งหมด") ถ้าอยาก 100% internal ไม่พึ่ง GitHub เลย ต้องใช้ **GitHub Enterprise Server** (จ่ายเงิน) หรือ **GitLab CE self-hosted** (ฟรี) หรือ **DIY git hook** (`post-receive` บน bare repo ของเราเอง ไม่ต้องมี token/service ภายนอกเลย)
+
+### GitLab CI/CD เทียบ GitHub Actions (สรุปสั้น)
+
+| | GitHub Actions | GitLab CI/CD |
+|---|---|---|
+| ไฟล์ config | หลายไฟล์ `.github/workflows/*.yml` | ไฟล์เดียว `.gitlab-ci.yml` |
+| จัดลำดับ job | ไม่มี stage ในตัว ใช้ `needs:` เอง | มี `stages:` ชัดเจน |
+| Self-host ฟรีไหม | ❌ ต้อง GitHub Enterprise Server (เสียเงิน) | ✅ GitLab CE ฟรี |
+| Spec ขั้นต่ำถ้า self-host | — | ~8GB RAM / 4 vCPU (หนักกว่า service อื่นในบทเรียนนี้มาก) |
